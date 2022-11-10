@@ -13,8 +13,7 @@
 
 /* ----------------------------------------------------------------------
  Contributing authors:
-   keyword option "fscale" to scale only forces during kspace adapt by Rodolfo
-   Paula Leite (Unicamp/BR)
+ Added a fscale keyword for kspace pppm and pppm/tip4p styles to adapt only the forces during MD simulations. Also added the possibility to adapt angle potential (such as angle_harmonic that is used in the examples) by Rodolfo Paula Leite (Unicamp/BR)
  ------------------------------------------------------------------------- */
 
 #include <cmath>
@@ -22,6 +21,7 @@
 #include <cstdlib>
 #include "fix_adapt.h"
 #include "atom.h"
+#include "angle.h"
 #include "bond.h"
 #include "update.h"
 #include "group.h"
@@ -42,7 +42,7 @@ using namespace LAMMPS_NS;
 using namespace FixConst;
 using namespace MathConst;
 
-enum{PAIR,KSPACE,ATOM,BOND};
+enum{PAIR,KSPACE,ATOM,BOND,ANGLE};
 enum{DIAMETER,CHARGE};
 
 /* ---------------------------------------------------------------------- */
@@ -76,6 +76,10 @@ nadapt(0), id_fix_diam(NULL), id_fix_chg(NULL), adapt(NULL)
       nadapt++;
       iarg += 3;
     } else if (strcmp(arg[iarg],"bond") == 0 ){
+      if (iarg+5 > narg) error->all(FLERR,"Illegal fix adapt command");
+      nadapt++;
+      iarg += 5;
+    } else if (strcmp(arg[iarg],"angle") == 0 ){
       if (iarg+5 > narg) error->all(FLERR,"Illegal fix adapt command");
       nadapt++;
       iarg += 5;
@@ -125,6 +129,25 @@ nadapt(0), id_fix_diam(NULL), id_fix_chg(NULL), adapt(NULL)
       adapt[nadapt].bond = NULL;
       strcpy(adapt[nadapt].bparam,arg[iarg+2]);
       force->bounds(FLERR,arg[iarg+3],atom->nbondtypes,
+                    adapt[nadapt].ilo,adapt[nadapt].ihi);
+      if (strstr(arg[iarg+4],"v_") == arg[iarg+4]) {
+        n = strlen(&arg[iarg+4][2]) + 1;
+        adapt[nadapt].var = new char[n];
+        strcpy(adapt[nadapt].var,&arg[iarg+4][2]);
+      } else error->all(FLERR,"Illegal fix adapt command");
+      nadapt++;
+      iarg += 5;
+    } else if (strcmp(arg[iarg],"angle") == 0 ){
+      if (iarg+5 > narg) error->all(FLERR, "Illegal fix adapt command");
+      adapt[nadapt].which = ANGLE;
+      int n = strlen(arg[iarg+1]) + 1;
+      adapt[nadapt].astyle = new char[n];
+      strcpy(adapt[nadapt].astyle,arg[iarg+1]);
+      n = strlen(arg[iarg+2]) + 1;
+      adapt[nadapt].agparam = new char[n];
+      adapt[nadapt].angle = NULL;
+      strcpy(adapt[nadapt].agparam,arg[iarg+2]);
+      force->bounds(FLERR,arg[iarg+3],atom->nangletypes,
                     adapt[nadapt].ilo,adapt[nadapt].ihi);
       if (strstr(arg[iarg+4],"v_") == arg[iarg+4]) {
         n = strlen(&arg[iarg+4][2]) + 1;
@@ -204,6 +227,13 @@ nadapt(0), id_fix_diam(NULL), id_fix_chg(NULL), adapt(NULL)
   for (int m = 0; m < nadapt; ++m)
     if (adapt[m].which == BOND)
       memory->create(adapt[m].vector_orig,n+1,"adapt:vector_orig");
+
+  // allocate angle style arrays:
+
+  n = atom->nangletypes;
+  for (int m = 0; m < nadapt; ++m)
+    if (adapt[m].which == ANGLE)
+      memory->create(adapt[m].vector_orig,n+1,"adapt:vector_orig");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -219,6 +249,10 @@ FixAdapt::~FixAdapt()
     } else if (adapt[m].which == BOND) {
       delete [] adapt[m].bstyle;
       delete [] adapt[m].bparam;
+      memory->destroy(adapt[m].vector_orig);
+    } else if (adapt[m].which == ANGLE) {
+      delete [] adapt[m].astyle;
+      delete [] adapt[m].agparam;
       memory->destroy(adapt[m].vector_orig);
     }
   }
@@ -331,6 +365,7 @@ void FixAdapt::init()
 
   anypair = 0;
   anybond = 0;
+  anyangle = 0;
 
   for (int m = 0; m < nadapt; m++) {
     Adapt *ad = &adapt[m];
@@ -434,6 +469,42 @@ void FixAdapt::init()
         error->all(FLERR,"Fix adapt does not support bond_style hybrid");
 
       delete [] bstyle;
+ 
+    } else if (ad->which == ANGLE){
+      ad->angle = NULL;
+      anyangle = 1;
+
+      int n = strlen(ad->astyle) + 1;
+      char *astyle = new char[n];
+      strcpy(astyle,ad->astyle);
+
+      if (lmp->suffix_enable) {
+        int len = 2 + strlen(astyle) + strlen(lmp->suffix);
+        char *asuffix = new char[len];
+        strcpy(asuffix,astyle);
+        strcat(asuffix,"/");
+        strcat(asuffix,lmp->suffix);
+        ad->angle = force->angle_match(asuffix);
+        delete [] asuffix;
+      }
+      if (ad->angle == NULL) ad->angle = force->angle_match(astyle);
+      if (ad->angle == NULL )
+        error->all(FLERR,"Fix adapt angle style does not exist");
+
+      void *ptr = ad->angle->extract(ad->agparam,ad->adim);
+
+      if (ptr == NULL)
+        error->all(FLERR,"Fix adapt angle style param not supported");
+
+      // for angle styles, use a vector
+
+      if (ad->adim == 1) ad->vector = (double *) ptr;
+
+      if (strcmp(force->angle_style,"hybrid") == 0 ||
+          strcmp(force->angle_style,"hybrid_overlay") == 0)
+        error->all(FLERR,"Fix adapt does not support angle_style hybrid");
+
+      delete [] astyle;
 
     } else if (ad->which == KSPACE) {
       if (force->kspace == NULL)
@@ -466,6 +537,10 @@ void FixAdapt::init()
       ad->scalar_orig = *ad->scalar;
 
     } else if (ad->which == BOND && ad->bdim == 1){
+      for (i = ad->ilo; i <= ad->ihi; ++i )
+        ad->vector_orig[i] = ad->vector[i];
+
+    } else if (ad->which == ANGLE && ad->adim == 1){
       for (i = ad->ilo; i <= ad->ihi; ++i )
         ad->vector_orig[i] = ad->vector[i];
     }
@@ -573,6 +648,18 @@ void FixAdapt::change_settings()
             ad->vector[i] = value;
       }
 
+    // set angle type array values:
+    //
+    } else if (ad->which == ANGLE) {
+      if (ad->adim == 1){
+        if (scaleflag)
+          for (i = ad->ilo; i <= ad->ihi; ++i )
+            ad->vector[i] = value*ad->vector_orig[i];
+        else
+          for (i = ad->ilo; i <= ad->ihi; ++i )
+            ad->vector[i] = value;
+      }
+
     // set kspace scale factor
 
     } else if (ad->which == KSPACE) {
@@ -645,7 +732,14 @@ void FixAdapt::change_settings()
       }
     }
   }
-
+  if (anyangle) {
+    for (int m = 0; m < nadapt; ++m ) {
+      Adapt *ad = &adapt[m];
+      if (ad->which == ANGLE) {
+        ad->angle->reinit();
+      }
+    }
+  }
   // reset KSpace charges if charges have changed
 
   if (chgflag && force->kspace) force->kspace->qsum_qsq();
@@ -672,6 +766,13 @@ void FixAdapt::restore_settings()
         for (int i = ad->ilo; i <= ad->ihi; i++)
           ad->vector[i] = ad->vector_orig[i];
       }
+
+    } else if (ad->which == ANGLE) {
+      if (ad->pdim == 1) {
+        for (int i = ad->ilo; i <= ad->ihi; i++)
+          ad->vector[i] = ad->vector_orig[i];
+      }
+
 
     } else if (ad->which == KSPACE) {
       *kspace_scale = 1.0;
@@ -708,6 +809,7 @@ void FixAdapt::restore_settings()
 
   if (anypair) force->pair->reinit();
   if (anybond) force->bond->reinit();
+  if (anyangle) force->angle->reinit();
   if (chgflag && force->kspace) force->kspace->qsum_qsq();
 }
 

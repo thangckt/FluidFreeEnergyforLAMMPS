@@ -10,6 +10,10 @@
 
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
+/* ----------------------------------------------------------------------
+Contributing authors:
+Added a fscale keyword for kspace pppm and pppm/tip4p styles to adapt only the forces during MD simulations. Also added the possibility to adapt angle potential (such as angle_harmonic that is used in the examples) by Rodolfo Paula Leite (Unicamp/BR)
+------------------------------------------------------------------------- */
 
 #ifdef FIX_CLASS
 
@@ -43,7 +47,7 @@ class FixAdapt : public Fix {
 
  private:
   int nadapt,resetflag,scaleflag,fscaleflag;
-  int anypair, anybond;
+  int anypair, anybond, anyangle;
   int nlevels_respa;
   char *id_fix_diam,*id_fix_chg;
   class FixStore *fix_diam,*fix_chg;
@@ -53,14 +57,16 @@ class FixAdapt : public Fix {
     char *var;
     char *pstyle,*pparam;
     char *bstyle,*bparam;
+    char *astyle,*agparam;
     int ilo,ihi,jlo,jhi;
-    int pdim,bdim;
+    int pdim,bdim,adim;
     double *scalar,scalar_orig;
     double *vector,*vector_orig;
     double **array,**array_orig;
     int aparam;
     class Pair *pair;
     class Bond *bond;
+    class Angle *angle;
   };
 
   Adapt *adapt;
